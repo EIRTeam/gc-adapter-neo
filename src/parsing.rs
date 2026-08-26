@@ -82,6 +82,15 @@ impl Stick {
     pub fn coords_centered(&self, center: (u8, u8)) -> (f32, f32) {
         (self.x.float_centered(center.0), self.y.float_centered(center.1))
     }
+
+    /// Gets the stick position as a normalized 2d vector, scaled using per-axis calibration data
+    /// (see [`AxisCalibration`]) derived from observed hardware readings rather than assuming
+    /// the stick can reach the full raw byte range. This is the most adequate way to get accurate
+    /// full-range values out of the adapter. see [`GcAdapter::calibration`](crate::GcAdapter::calibration)
+    /// for calibration that is automatically tracked for you.
+    pub fn coords_calibrated(&self, cal_x: &AxisCalibration, cal_y: &AxisCalibration) -> (f32, f32) {
+        (self.x.float_calibrated(cal_x), self.y.float_calibrated(cal_y))
+    }
 }
 
 /// The two analog triggers. For the digital portion, see [`Buttons::right_trigger`] and
@@ -139,11 +148,8 @@ pub enum Packet {
 }
 
 impl Packet {
-    /// Parse a packet from a 37 byte buffer
-    pub fn parse(buffer: [u8; 37]) -> Self {
+    pub fn parse(buffer: [u8; 37]) -> Result<Self, binread::Error> {
         let mut reader = binread::io::Cursor::new(&buffer[..]);
-        let packet: Packet = reader.read_ne().unwrap();
-
-        packet
+        reader.read_ne()
     }
 }
