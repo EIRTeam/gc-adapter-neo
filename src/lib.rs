@@ -9,8 +9,8 @@
 //!
 //! ## Example
 //!
-//! ```rust
-//! use gc_adapter::GcAdapter;
+//! ```rust,ignore
+//! use gc_adapter_neo::GcAdapter;
 //!
 //! // get adapter from global context
 //! let mut adapter = GcAdapter::from_usb().unwrap().expect("no adapter plugged in");
@@ -23,7 +23,7 @@
 //!
 //! // enable rumble for only ports 4
 //! adapter.set_rumble([false, false, false, true]).unwrap();
-//! 
+//!
 //! std::thread::sleep(std::time::Duration::from_millis(100));
 //!
 //! // on drop all rumble will be disabled and the USB connection
@@ -46,7 +46,7 @@ pub use parsing::*;
 
 /// Types for represent various axis types
 mod axis;
-pub use axis::{AxisCalibration, SignedAxis, UnsignedAxis};
+pub use axis::{SignedAxis, StickCalibration, UnsignedAxis};
 
 /// Types/Traits for handling USB connections
 mod usb;
@@ -84,26 +84,22 @@ impl core::fmt::Display for AdapterError {
 #[cfg(feature = "libusb")]
 impl std::error::Error for AdapterError {}
 
-/// Per-port stick calibration
+/// Per-port stick origins used for Melee-style normalization.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PortCalibration {
-    pub left_stick_x: AxisCalibration,
-    pub left_stick_y: AxisCalibration,
-    pub right_stick_x: AxisCalibration,
-    pub right_stick_y: AxisCalibration,
+    pub left_stick: StickCalibration,
+    pub right_stick: StickCalibration,
 }
 
 impl PortCalibration {
-    /// Get the calibrated left stick coordinates for a controller read from the same port this
-    /// calibration was obtained from.
-    pub fn left_stick(&self, controller: &Controller) -> (f32, f32) {
-        controller.left_stick.coords_calibrated(&self.left_stick_x, &self.left_stick_y)
+    /// Get the normalized left stick coordinates for a controller read from this port.
+    pub fn left_stick_coords(&self, controller: &Controller) -> (f32, f32) {
+        controller.left_stick.coords_calibrated(&self.left_stick)
     }
 
-    /// Get the calibrated right stick (c-stick) coordinates for a controller read from the same
-    /// port this calibration was obtained from.
-    pub fn right_stick(&self, controller: &Controller) -> (f32, f32) {
-        controller.right_stick.coords_calibrated(&self.right_stick_x, &self.right_stick_y)
+    /// Get the normalized right stick coordinates for a controller read from this port.
+    pub fn right_stick_coords(&self, controller: &Controller) -> (f32, f32) {
+        controller.right_stick.coords_calibrated(&self.right_stick)
     }
 }
 
@@ -122,12 +118,15 @@ impl<T: AdapterHardware> GcAdapter<T> {
             ports[0] as u8,
             ports[1] as u8,
             ports[2] as u8,
-            ports[3] as u8
+            ports[3] as u8,
         ];
 
         self.usb.write_interrupt(&payload[..])?;
         let mut buf = [0u8; 37];
-        self.usb.read_interrupt(&mut buf)?;
+        let n = self.usb.read_interrupt(&mut buf)?;
+        if n == buf.len() {
+            self.process_report(buf);
+        }
         Ok(())
     }
 
@@ -136,7 +135,10 @@ impl<T: AdapterHardware> GcAdapter<T> {
     pub fn refresh_inputs(&mut self) -> Result<(), UsbError> {
         for _ in 0..10 {
             let mut buf = [0u8; 37];
-            self.usb.read_interrupt(&mut buf)?;
+            let n = self.usb.read_interrupt(&mut buf)?;
+            if n == buf.len() {
+                self.process_report(buf);
+            }
         }
         Ok(())
     }
@@ -145,10 +147,10 @@ impl<T: AdapterHardware> GcAdapter<T> {
     ///
     /// Stick/axis calibration is automatically updated based on the result: when a controller is
     /// newly detected, its origin is recaptured (mirroring the GameCube's own origin behavior),
-    /// and the observed range is progressively widened as the stick is moved. Use
+    /// and fixed radius-80 normalization remains stable as the stick is moved. Use
     /// [`calibration`](GcAdapter::calibration) to retrieve it for converting raw stick bytes into
-    /// an accurate [-1.0, 1.0] range via [`PortCalibration::left_stick`]/
-    /// [`PortCalibration::right_stick`].
+    /// a normalized [-1.0, 1.0] range via [`PortCalibration::left_stick_coords`]/
+    /// [`PortCalibration::right_stick_coords`]. No deadzone is applied.
     pub fn read_controllers(&mut self) -> Result<[Controller; 4], AdapterError> {
         let mut buf = [0u8; 37];
         let n = self.usb.read_interrupt(&mut buf)?;
@@ -172,27 +174,25 @@ impl<T: AdapterHardware> GcAdapter<T> {
         &self.calibration[chan]
     }
 
+    fn process_report(&mut self, buffer: [u8; 37]) {
+        if let Ok(Packet::ControllerInfo { ports }) = Packet::parse(buffer) {
+            self.update_calibration(&ports);
+        }
+    }
+
     fn update_calibration(&mut self, ports: &[Controller; 4]) {
         for (i, controller) in ports.iter().enumerate() {
             let connected = controller.connected();
             let cal = &mut self.calibration[i];
 
             if connected {
-                let (lx, ly) = controller.left_stick.raw();
-                let (rx, ry) = controller.right_stick.raw();
+                let left = controller.left_stick.raw();
+                let right = controller.right_stick.raw();
 
                 if !self.was_connected[i] {
-                    // Newly connected: recapture the origin, mirroring the GameCube's
-                    // PAD_GET_ORIGIN/SetOrigin behavior.
-                    cal.left_stick_x.recenter(lx);
-                    cal.left_stick_y.recenter(ly);
-                    cal.right_stick_x.recenter(rx);
-                    cal.right_stick_y.recenter(ry);
-                } else {
-                    cal.left_stick_x.observe(lx);
-                    cal.left_stick_y.observe(ly);
-                    cal.right_stick_x.observe(rx);
-                    cal.right_stick_y.observe(ry);
+                    // Newly connected: capture the origin, mirroring GameCube PAD origin behavior.
+                    cal.left_stick.recenter(left);
+                    cal.right_stick.recenter(right);
                 }
             }
 
@@ -235,10 +235,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn origin_is_captured_once_per_connection() {
+        let mut adapter = GcAdapter::new(TestHardware);
+        let connected = Controller {
+            status: ControllerStatus::new().with_controller_type(ControllerType::Normal),
+            left_stick: Stick {
+                x: SignedAxis::from_raw(140),
+                y: SignedAxis::from_raw(120),
+            },
+            ..Default::default()
+        };
+
+        adapter.update_calibration(&[
+            connected,
+            Controller::default(),
+            Controller::default(),
+            Controller::default(),
+        ]);
+        assert_eq!(adapter.calibration(0).left_stick.center(), (140, 120));
+
+        let moved = Controller {
+            status: connected.status,
+            left_stick: Stick {
+                x: SignedAxis::from_raw(200),
+                y: SignedAxis::from_raw(60),
+            },
+            ..Default::default()
+        };
+        adapter.update_calibration(&[
+            moved,
+            Controller::default(),
+            Controller::default(),
+            Controller::default(),
+        ]);
+        assert_eq!(adapter.calibration(0).left_stick.center(), (140, 120));
+
+        adapter.update_calibration(&[
+            Controller::default(),
+            Controller::default(),
+            Controller::default(),
+            Controller::default(),
+        ]);
+        adapter.update_calibration(&[
+            moved,
+            Controller::default(),
+            Controller::default(),
+            Controller::default(),
+        ]);
+        assert_eq!(adapter.calibration(0).left_stick.center(), (200, 60));
+    }
+
+    struct TestHardware;
+
+    impl AdapterHardware for TestHardware {
+        fn write_interrupt(&mut self, _: &[u8]) -> Result<(), UsbError> {
+            Ok(())
+        }
+
+        fn read_interrupt(&mut self, _: &mut [u8]) -> Result<usize, UsbError> {
+            Ok(0)
+        }
+    }
+
+    #[test]
     #[cfg(feature = "libusb")]
     fn test_display_controllers() {
         // get adapter from global context
-        let mut adapter = GcAdapter::from_usb().unwrap().expect("no adapter plugged in");
+        let mut adapter = GcAdapter::from_usb()
+            .unwrap()
+            .expect("no adapter plugged in");
 
         // refresh inputs to ensure they are up to date
         adapter.refresh_inputs().unwrap();
@@ -247,6 +312,6 @@ mod tests {
         let controllers = adapter.read_controllers().unwrap();
         dbg!(&controllers);
 
-        dbg!(adapter.calibration(3).left_stick(&controllers[3]));
+        dbg!(adapter.calibration(3).left_stick_coords(&controllers[3]));
     }
 }

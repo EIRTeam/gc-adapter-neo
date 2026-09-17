@@ -1,6 +1,6 @@
 [package]
 name = "gc-adapter-neo"
-version = "1.0.0"
+version = "1.1.0"
 authors = ["jam1garner <8260240+jam1garner@users.noreply.github.com>, Álex Román Núñez <eirexe@eirteam.moe>"]
 edition = "2018"
 license = "MIT"

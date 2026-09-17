@@ -1,5 +1,5 @@
-use core::fmt::{self, Debug, Formatter};
 use binread::{BinRead, BinReaderExt};
+use core::fmt::{self, Debug, Formatter};
 use modular_bitfield::prelude::*;
 
 use crate::axis::*;
@@ -29,7 +29,8 @@ pub struct ControllerStatus {
     pub has_rumble: bool,
     pub unk3: bool,
     pub controller_type: ControllerType,
-    padding: B2
+    #[allow(dead_code)]
+    padding: B2,
 }
 
 /// A collection of which buttons are pressed
@@ -38,7 +39,7 @@ pub struct ControllerStatus {
 /// them all the way down). For the analog part of the triggers, see
 /// [`Controller::triggers`](Controller::triggers).
 #[bitfield]
-#[derive(BinRead, Debug, Default)]
+#[derive(BinRead, Debug, Default, Clone, Copy)]
 #[br(map = Self::from_bytes)]
 pub struct Buttons {
     pub a: bool,
@@ -59,7 +60,7 @@ pub struct Buttons {
 }
 
 /// An analog control stick. Can represent either the left or right stick.
-#[derive(BinRead, Debug, Default)]
+#[derive(BinRead, Debug, Default, Clone, Copy)]
 pub struct Stick {
     pub x: SignedAxis,
     pub y: SignedAxis,
@@ -72,7 +73,7 @@ impl Stick {
     }
 
     /// Gets the stick position as a normalized 2d vector. For higher accuracy, use
-    /// [`coords_centered`](Stick::coords_centered) as it allows you to specifiy the 
+    /// [`coords_centered`](Stick::coords_centered) as it allows you to specifiy the
     pub fn coords(&self) -> (f32, f32) {
         (self.x.float(), self.y.float())
     }
@@ -80,29 +81,29 @@ impl Stick {
     /// Gets the stick position as a normalized 2d vector. The provided center should be obtained
     /// using the [`raw`](Stick::raw) method.
     pub fn coords_centered(&self, center: (u8, u8)) -> (f32, f32) {
-        (self.x.float_centered(center.0), self.y.float_centered(center.1))
+        (
+            self.x.float_centered(center.0),
+            self.y.float_centered(center.1),
+        )
     }
 
-    /// Gets the stick position as a normalized 2d vector, scaled using per-axis calibration data
-    /// (see [`AxisCalibration`]) derived from observed hardware readings rather than assuming
-    /// the stick can reach the full raw byte range. This is the most adequate way to get accurate
-    /// full-range values out of the adapter. see [`GcAdapter::calibration`](crate::GcAdapter::calibration)
-    /// for calibration that is automatically tracked for you.
-    pub fn coords_calibrated(&self, cal_x: &AxisCalibration, cal_y: &AxisCalibration) -> (f32, f32) {
-        (self.x.float_calibrated(cal_x), self.y.float_calibrated(cal_y))
+    /// Gets the stick position normalized with a connection-time origin and Melee's fixed radius.
+    /// [`GcAdapter::calibration`](crate::GcAdapter::calibration).
+    pub fn coords_calibrated(&self, calibration: &StickCalibration) -> (f32, f32) {
+        calibration.normalize(self.raw())
     }
 }
 
 /// The two analog triggers. For the digital portion, see [`Buttons::right_trigger`] and
 /// [`Buttons::left_trigger`].
-#[derive(BinRead, Debug, Default)]
+#[derive(BinRead, Debug, Default, Clone, Copy)]
 pub struct Triggers {
     pub left: UnsignedAxis,
     pub right: UnsignedAxis,
 }
 
 /// A controller port: either disconnected or otherwise.
-#[derive(BinRead, Default)]
+#[derive(BinRead, Default, Clone, Copy)]
 pub struct Controller {
     pub status: ControllerStatus,
     pub buttons: Buttons,
@@ -137,7 +138,7 @@ impl Debug for Controller {
     }
 }
 
-/// A Gamecube Controller adapter USB payload 
+/// A Gamecube Controller adapter USB payload
 #[derive(BinRead, Debug)]
 pub enum Packet {
     #[br(magic = 0x21u8)]

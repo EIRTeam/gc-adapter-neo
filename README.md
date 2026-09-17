@@ -13,16 +13,16 @@ Code:
 use gc_adapter::GcAdapter;
 
 // get adapter from global context
-let mut adapter = GcAdapter::from_usb().unwrap();
+let mut adapter = GcAdapter::from_usb().unwrap().expect("no adapter plugged in");
 
 // refresh inputs to ensure they are up to date
-adapter.refresh_inputs();
+adapter.refresh_inputs().unwrap();
 
 // read and display all controller ports
-dbg!(adapter.read_controllers());
+dbg!(adapter.read_controllers().unwrap());
 
 // enable rumble for only ports 1 and 4
-adapter.set_rumble([false, false, false, true]);
+adapter.set_rumble([false, false, false, true]).unwrap();
 
 std::thread::sleep(std::time::Duration::from_millis(100));
 

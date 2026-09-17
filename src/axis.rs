@@ -1,57 +1,48 @@
 use binread::BinRead;
 
-/// Dolphin/GC-style automatic bound calibration based on minimum and maximum values reported
+/// The connection-time origin used to normalize a GameCube stick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AxisCalibration {
-    center: u8,
-    min: u8,
-    max: u8,
+pub struct StickCalibration {
+    center: (u8, u8),
 }
 
-impl Default for AxisCalibration {
-    /// A reasonable starting point based on typical real GameCube controller hardware, used
-    /// before any samples have been observed.
+impl Default for StickCalibration {
     fn default() -> Self {
-        Self { center: 128, min: 38, max: 218 }
+        Self { center: (128, 128) }
     }
 }
 
-impl AxisCalibration {
-    /// Reset the calibration around a freshly observed center value, e.g. when a controller is
-    /// newly connected. This tightens `min`/`max` back down to the new center; call
-    /// [`observe`](AxisCalibration::observe) on subsequent readings to widen the range again as
-    /// the stick moves.
-    pub fn recenter(&mut self, raw: u8) {
-        self.center = raw;
-        self.min = raw;
-        self.max = raw;
+impl StickCalibration {
+    pub const RADIUS: f32 = 80.0;
+
+    /// Capture the controller's current stick position as its origin.
+    pub fn recenter(&mut self, center: (u8, u8)) {
+        self.center = center;
     }
 
-    /// Widen the known range to include a newly observed raw sample. Never shrinks the range.
-    pub fn observe(&mut self, raw: u8) {
-        if raw < self.min {
-            self.min = raw;
-        }
-        if raw > self.max {
-            self.max = raw;
-        }
-    }
-
-    pub fn center(&self) -> u8 {
+    pub fn center(&self) -> (u8, u8) {
         self.center
     }
 
-    pub fn min(&self) -> u8 {
-        self.min
-    }
+    /// Convert a raw stick position using Melee's fixed radius-80 normalization.
+    /// No deadzone is applied.
+    pub fn normalize(&self, raw: (u8, u8)) -> (f32, f32) {
+        let mut x = raw.0 as f32 - self.center.0 as f32;
+        let mut y = raw.1 as f32 - self.center.1 as f32;
+        let magnitude = (x * x + y * y).sqrt();
 
-    pub fn max(&self) -> u8 {
-        self.max
+        if magnitude > Self::RADIUS {
+            let scale = Self::RADIUS / magnitude;
+            x *= scale;
+            y *= scale;
+        }
+
+        (x / Self::RADIUS, y / Self::RADIUS)
     }
 }
 
 /// An unsigned axis, representing a centered value, such as a joystick axis.
-#[derive(BinRead, Debug, Default)]
+#[derive(BinRead, Debug, Default, Clone, Copy)]
 pub struct SignedAxis(u8);
 
 impl SignedAxis {
@@ -85,8 +76,7 @@ impl SignedAxis {
     ///
     /// **Note:** this assumes the axis can reach the full `0..=255` range, which real GameCube
     /// controllers almost never do, they max out well short of the edges. For
-    /// accurate full-range output, prefer [`float_calibrated`](SignedAxis::float_calibrated)
-    /// with an [`AxisCalibration`] derived from observed hardware readings.
+    /// accurate fixed-radius output, use [`StickCalibration::normalize`].
     pub fn float_centered(&self, center: u8) -> f32 {
         let center_offset = ((self.0 as i16) - (center as i16)) as f32;
         let scale = if self.0 >= center {
@@ -113,38 +103,10 @@ impl SignedAxis {
 
         (center_offset / scale).clamp(-1.0, 1.0)
     }
-
-    /// Return axis as an `f32` in the range of [-1.0, 1.0], scaled using the observed hardware
-    pub fn float_calibrated(&self, cal: &AxisCalibration) -> f32 {
-        let raw = self.0 as f32;
-        let center = cal.center as f32;
-
-        if self.0 >= cal.center {
-            let span = (cal.max as f32 - center).max(1.0);
-            ((raw - center) / span).min(1.0)
-        } else {
-            let span = (center - cal.min as f32).max(1.0);
-            ((raw - center) / span).max(-1.0)
-        }
-    }
-
-    /// `f64` variant of [`float_calibrated`](SignedAxis::float_calibrated).
-    pub fn double_calibrated(&self, cal: &AxisCalibration) -> f64 {
-        let raw = self.0 as f64;
-        let center = cal.center as f64;
-
-        if self.0 >= cal.center {
-            let span = (cal.max as f64 - center).max(1.0);
-            ((raw - center) / span).min(1.0)
-        } else {
-            let span = (center - cal.min as f64).max(1.0);
-            ((raw - center) / span).max(-1.0)
-        }
-    }
 }
 
 /// An unsigned axis, representing a positive or zero value.
-#[derive(BinRead, Debug, Default)]
+#[derive(BinRead, Debug, Default, Clone, Copy)]
 pub struct UnsignedAxis(u8);
 
 impl UnsignedAxis {
@@ -156,12 +118,12 @@ impl UnsignedAxis {
         self.0
     }
 
-    /// Return axis as an `f32` in the range of [-1.0, 1.0]
+    /// Return axis as an `f32` in the range of [0.0, 1.0]
     pub fn float(&self) -> f32 {
         (self.0 as f32) / 255.0
     }
 
-    /// Return axis as an `f64` in the range of [-1.0, 1.0]
+    /// Return axis as an `f64` in the range of [0.0, 1.0]
     ///
     /// **Note:** You likely do not want the additional precision.
     pub fn double(&self) -> f64 {
@@ -171,7 +133,25 @@ impl UnsignedAxis {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::StickCalibration;
+
+    #[test]
+    fn fixed_radius_normalization_has_no_deadzone() {
+        let calibration = StickCalibration::default();
+
+        assert_eq!(calibration.normalize((128, 128)), (0.0, 0.0));
+        assert_eq!(calibration.normalize((129, 128)), (1.0 / 80.0, 0.0));
+        assert_eq!(calibration.normalize((208, 128)), (1.0, 0.0));
+    }
+
+    #[test]
+    fn fixed_radius_normalization_clamps_magnitude() {
+        let calibration = StickCalibration::default();
+        let (x, y) = calibration.normalize((255, 255));
+
+        assert!((x * x + y * y - 1.0).abs() < 0.000001);
+        assert!((x - y).abs() < 0.000001);
+    }
 
     //#[test]
     //fn test_signed() {

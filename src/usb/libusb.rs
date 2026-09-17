@@ -1,4 +1,4 @@
-use rusb::{DeviceHandle, UsbContext, GlobalContext};
+use rusb::{DeviceHandle, GlobalContext, UsbContext};
 use std::time::Duration;
 
 use super::{AdapterHardware, UsbError};
@@ -43,11 +43,16 @@ impl<Context: UsbContext> LibUsbAdapter<Context> {
         let has_kernel_driver = handle.kernel_driver_active(endpoint).unwrap_or(false);
 
         if has_kernel_driver {
-            handle.detach_kernel_driver(endpoint).map_err(map_rusb_error)?;
+            handle
+                .detach_kernel_driver(endpoint)
+                .map_err(map_rusb_error)?;
         }
 
         handle.claim_interface(endpoint).map_err(map_rusb_error)?;
-        let mut adapter = Self { handle, has_kernel_driver };
+        let mut adapter = Self {
+            handle,
+            has_kernel_driver,
+        };
 
         // Mirrors Dolphin's CheckDeviceAccess: this HID SET_IDLE-style control transfer is
         // required for some 3rd party adapters (e.g. Nyko) to start reporting input, but is
